@@ -5,88 +5,105 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/receipts"
 	"github.com/ThreeDotsLabs/go-event-driven/common/clients/spreadsheets"
 	commonHTTP "github.com/ThreeDotsLabs/go-event-driven/common/http"
 	"github.com/ThreeDotsLabs/go-event-driven/common/log"
+	"github.com/ThreeDotsLabs/watermill"
+	"github.com/ThreeDotsLabs/watermill-redisstream/pkg/redisstream"
+	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/labstack/echo/v4"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 )
 
 type TicketsConfirmationRequest struct {
 	Tickets []string `json:"tickets"`
 }
 
-type Task int
-
-const (
-	TaskIssueReceipt Task = iota
-	TaskAppendToTracker
-)
-
-type Message struct {
-	Task     Task
-	TicketId string
-}
-
-type Worker struct {
-	queue chan Message
-}
-
-func NewWorker() *Worker {
-	return &Worker{
-		queue: make(chan Message, 100),
-	}
-}
-
-func (w *Worker) Send(msg ...Message) {
-	for _, m := range msg {
-		w.queue <- m
-	}
-}
-
-func (w *Worker) Run() {
-	clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
-	if err != nil {
-		panic(err)
-	}
-	receiptsClient := NewReceiptsClient(clients)
-	spreadsheetsClient := NewSpreadsheetsClient(clients)
-	for {
-		ctx := context.Background()
-
-		for message := range w.queue {
-			switch message.Task {
-			case TaskIssueReceipt:
-				// issue the ticket
-				err := receiptsClient.IssueReceipt(ctx, message.TicketId)
-				if err != nil {
-					w.Send(message)
-				}
-			case TaskAppendToTracker:
-				// append to tracker spreadsheet
-
-				err := spreadsheetsClient.AppendRow(
-					ctx, "tickets-to-print",
-					[]string{message.TicketId},
-				)
-				if err != nil {
-					w.Send(message)
-				}
-
-			}
-		}
-	}
-}
-
 func main() {
 	log.Init(logrus.InfoLevel)
 
-	w := NewWorker()
+	logger := watermill.NewStdLogger(false, false)
 
-	go w.Run()
+	rdb := redis.NewClient(&redis.Options{
+		Addr: os.Getenv("REDIS_ADDR"),
+	})
+
+	publisher, err := redisstream.NewPublisher(redisstream.PublisherConfig{
+		Client: rdb,
+	}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	issueSub, err := redisstream.NewSubscriber(redisstream.SubscriberConfig{
+		Client:        rdb,
+		ConsumerGroup: "issueGroup",
+	}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	trackerSub, err := redisstream.NewSubscriber(redisstream.SubscriberConfig{
+		Client:        rdb,
+		ConsumerGroup: "trackerGroup",
+	}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	router, err := message.NewRouter(message.RouterConfig{}, logger)
+	if err != nil {
+		panic(err)
+	}
+
+	router.AddNoPublisherHandler(
+		"my_handler",
+		"issue-receipt",
+		issueSub,
+		func(msg *message.Message) error {
+			clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
+			if err != nil {
+				// panic(err)
+				return err
+			}
+			receiptsClient := NewReceiptsClient(clients)
+
+			// for msg := range messages {
+			ticketId := string(msg.Payload)
+			err = receiptsClient.IssueReceipt(msg.Context(), ticketId)
+			// }
+			return err
+		},
+	)
+	router.AddNoPublisherHandler(
+		"my_handler2",
+		"append-to-tracker",
+		trackerSub,
+		func(msg *message.Message) error {
+			clients, err := clients.NewClients(os.Getenv("GATEWAY_ADDR"), nil)
+			if err != nil {
+				// panic(err)
+				return err
+			}
+			spreadsheetClient := NewSpreadsheetsClient(clients)
+
+			// for msg := range messages {
+			ticketId := string(msg.Payload)
+			err = spreadsheetClient.AppendRow(
+				msg.Context(),
+				"tickets-to-print",
+				[]string{ticketId},
+			)
+			return err
+		},
+	)
+
 	e := commonHTTP.NewEcho()
 
 	e.POST("/tickets-confirmation", func(c echo.Context) error {
@@ -97,33 +114,63 @@ func main() {
 		}
 
 		for _, ticket := range request.Tickets {
-			/*
-				err = receiptsClient.IssueReceipt(c.Request().Context(), ticket)
-				if err != nil {
-					return err
-				}*/
-			/*
-				err = spreadsheetsClient.AppendRow(
-					c.Request().Context(),
-					"tickets-to-print",
-					[]string{ticket},
-				)
-				if err != nil {
-					return err
+			// w.Send(Message{Task: TaskIssueReceipt, TicketId: ticket},
+			// 	Message{Task: TaskAppendToTracker, TicketId: ticket},
+			// )
+
+			go func() {
+				for {
+					msg := message.NewMessage(watermill.NewUUID(), []byte(string(ticket)))
+					if err := publisher.Publish("issue-receipt", msg); err != nil {
+						continue
+					}
+					break
 				}
-			*/
-			w.Send(Message{Task: TaskIssueReceipt, TicketId: ticket},
-				Message{Task: TaskAppendToTracker, TicketId: ticket},
-			)
+			}()
+
+			go func(ticketId []byte) {
+				for {
+					msg := message.NewMessage(watermill.NewUUID(), ticketId)
+					if err := publisher.Publish("append-to-tracker", msg); err != nil {
+						continue
+					}
+					break
+				}
+			}([]byte(string(ticket)))
 		}
 
 		return c.NoContent(http.StatusOK)
 	})
 
-	logrus.Info("Server starting...")
+	e.GET("/health", func(c echo.Context) error {
+		return c.String(http.StatusOK, "ok")
+	})
 
-	err := e.Start(":8080")
-	if err != nil && err != http.ErrServerClosed {
+	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	defer cancel()
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		return router.Run(ctx)
+	})
+
+	g.Go(func() error {
+		<-router.Running()
+		logrus.Info("Server starting...")
+		err = e.Start(":8080")
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		<-ctx.Done()
+		return e.Shutdown(ctx)
+	})
+
+	if err := g.Wait(); err != nil {
 		panic(err)
 	}
 }
