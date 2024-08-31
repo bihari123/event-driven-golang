@@ -1,60 +1,27 @@
-# Error logging
+# Time for Refactoring!
 
-In the next several exercises, we'll look at a few ways to handle errors in handlers.
+During development, we might not always have the necessary time to implement everything in the most optimal way. 
+Sometimes, we may find that our initial assumptions don't hold true.
 
-Middleware functions are a great place to keep the error-handling logic. 
-There are two ways you can capture errors in middleware.
-
-The first one is to store the return values in variables and return them.
-
-```go
-func HandleErrors(next message.HandlerFunc) message.HandlerFunc {
-	return func(msg *message.Message) ([]*message.Message, error) {
-		msgs, err := next(msg)
-		
-		if err != nil {
-			// Handle the error 
-		}
-		
-		return msgs, err
-	}
-}
-```
-
-The second one is to use `defer` and named returns. This is a different flavor of the same thing.
-
-```go
-func HandleErrors(next message.HandlerFunc) message.HandlerFunc {
-	return func(msg *message.Message) (msgs []*message.Message, err error) {
-		defer func() {
-			if err != nil { 
-				// Handle the error
-			}
-		}()
-
-		return next(msg)
-	}
-}
-```
-
-Note that regardless of when in the sequence the middleware is added,
-the error handling will be done at the end, after the handler and all other middleware functions are executed.
-Previously, we used middleware that executed before the handler.
-This pattern is a way to run some code after it.
+As our project continues to grow, the right moment may come for some refactoring. 
+This will help maintain the code's simplicity and manageability for future exercises.
 
 ## Exercise
 
 File: `project/main.go`
 
-Extend the logging middleware to also log errors.
+In this module, we will focus on component testing.
+It may be worthwhile to refactor the code in a way that it will be easier to test and extend in the future.
+Did you cut corners somewhere? Can you improve the code in some way?
+It's a good time to pause for a moment and think about this. 
+It's often good to do this in a real project after achieving a milestone — there is always some technical debt we can repay.
 
-The log message should be:
+In this module, we're not introducing any new functionality. 
+If there are areas in the code, you feel could benefit from improvement, go ahead and enhance them. 
+However, if you believe your code is already perfect, feel free to submit the solution without making any changes. 
 
-```
-Message handling error
-```
-
-It should include two log fields: `error` with the error and `message_uuid` with the message UUID.
+On our side, we introduced a few packages so it's easier to understand what's going on.
+If you're looking for inspiration, you can return to this exercise and check the solution.
 
 
 <div class="alert alert-dismissible bg-light-primary d-flex flex-column flex-sm-row p-7 mb-10">
@@ -67,18 +34,15 @@ It should include two log fields: `error` with the error and `message_uuid` with
 		</h3>
         <span>
 
-There are two ways you can add multiple keys in logrus:
+There is no perfect way of organizing code.
 
-```go
-logger.WithField("key1", value1).WithField("key2", value2).Info("Log message")
-```
+You don't need to follow exactly the same layout as we do in the example solution.
+We used a format that would be easy to understand by anyone.
+**You don't need to replicate this layout in your project. Use what works best for you.**
 
-```go
-logger.WithFields(logrus.Fields{
-	"key1": value1, 
-	"key2": value2,
-}).Info("Log message")
-```
+Usually, we would use the Clean Architecture approach.
+This is out of the scope of this training, as we want to keep it easy to understand for everyone.
+If you want to experiment with Clean Architecture, please check our ["Introducing Clean Architecture" article](https://threedots.tech/post/introducing-clean-architecture/).
 
 </span>
 	</div>
